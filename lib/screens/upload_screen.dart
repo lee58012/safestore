@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'dart:convert'; // JSON 파싱을 위해 필요
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
+import '../models/abnormal_log.dart'; // 모델 import
 
 class UploadScreen extends StatefulWidget {
   @override
@@ -20,66 +22,100 @@ class _UploadScreenState extends State<UploadScreen> {
     super.dispose();
   }
 
-  // 갤러리에서 영상 선택 및 썸네일 준비
   Future<void> _pickVideo() async {
     final pickedFile = await ImagePicker().pickVideo(source: ImageSource.gallery);
     if (pickedFile != null) {
       File videoFile = File(pickedFile.path);
-
-      _thumbnailController?.dispose(); // 기존 컨트롤러 해제
-
+      _thumbnailController?.dispose();
       _thumbnailController = VideoPlayerController.file(videoFile);
       try {
         await _thumbnailController!.initialize();
-        await _thumbnailController!.setVolume(0.0); // 소리 끄기
-
-        // [수정된 부분] 갤러리 썸네일과 비슷하게 만들기 위해 '1초' 지점으로 이동
-        // 영상 길이가 1초보다 길면 1초 지점의 화면을 보여줍니다.
+        await _thumbnailController!.setVolume(0.0);
         if (_thumbnailController!.value.duration > Duration(seconds: 1)) {
           await _thumbnailController!.seekTo(Duration(seconds: 1));
         }
-
-        await _thumbnailController!.pause(); // 재생하지 않고 일시정지 상태 유지
-
+        await _thumbnailController!.pause();
         setState(() {
           _selectedVideo = videoFile;
         });
       } catch (e) {
-        print("비디오 초기화 오류: $e");
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('비디오를 불러오는 중 오류가 발생했습니다.')),
-        );
+        print("비디오 로드 에러: $e");
       }
     }
   }
 
-  // 서버로 영상 전송
-  Future<void> _uploadVideo() async {
+  // [수정] 서버로 보내고 결과를 받아서 화면 이동
+  Future<void> _uploadAndAnalyze() async {
     if (_selectedVideo == null) return;
 
     setState(() { _isUploading = true; });
 
     try {
-      // TODO: 실제 백엔드 IP로 변경 (예: http://192.168.0.5:8000/upload)
-      var uri = Uri.parse('http://YOUR_BACKEND_IP:8000/upload');
+      // ngrok 주소 확인 필수
+      // [수정된 코드]
+      var uri = Uri.parse('https://becomingly-vowless-peggy.ngrok-free.dev/upload');
       var request = http.MultipartRequest('POST', uri);
-
       request.files.add(await http.MultipartFile.fromPath('file', _selectedVideo!.path));
 
-      var response = await request.send().timeout(Duration(seconds: 30));
+      // 서버 응답 대기 (분석 시간에 따라 오래 걸릴 수 있음)
+      var streamedResponse = await request.send();
+      var response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('분석 요청 성공!')));
-        setState(() {
-          _selectedVideo = null;
-          _thumbnailController?.dispose();
-          _thumbnailController = null;
-        });
+        // JSON 파싱
+        var jsonResponse = jsonDecode(utf8.decode(response.bodyBytes));
+        List<dynamic> logsJson = jsonResponse['data']; // 서버가 보낸 리스트
+
+        // 모델로 변환
+        List<AbnormalLog> analysisResults = logsJson.map((json) => AbnormalLog(
+          timestamp: json['timestamp'] ?? '',
+          videoUrl: json['videoUrl'] ?? '', // 현재는 빈 문자열일 수 있음
+          // type: json['type'] ?? '', // 모델에 type 필드가 있다면 추가
+        )).toList();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('분석 완료!')));
+
+          // 결과를 보여주는 화면으로 이동 (여기서는 LogListScreen을 재활용하거나 새로 만듦)
+          // *주의: LogListScreen이 데이터를 받을 수 있게 수정해야 함.
+          // 간단하게 결과를 팝업으로 띄우거나, LogListScreen에 전달.
+
+          showDialog(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Text("분석 결과"),
+              content: Container(
+                width: double.maxFinite,
+                height: 300,
+                child: analysisResults.isEmpty
+                    ? Center(child: Text("이상행동이 발견되지 않았습니다."))
+                    : ListView.builder(
+                  itemCount: analysisResults.length,
+                  itemBuilder: (context, index) {
+                    var log = analysisResults[index];
+                    // AbnormalLog 모델에 'type' 필드가 없으면 timestamp만 표시됨
+                    // 필요하면 모델에 type 필드 추가 권장
+                    return ListTile(
+                      leading: Icon(Icons.warning, color: Colors.red),
+                      title: Text("이상행동 감지"),
+                      subtitle: Text("시간: ${log.timestamp}"),
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: Text("확인"))
+              ],
+            ),
+          );
+        }
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('업로드 실패: ${response.statusCode}')));
+        print("서버 에러: ${response.body}");
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('분석 실패: 서버 오류')));
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('업로드 중 에러 발생: $e')));
+      print("에러: $e");
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('에러 발생: $e')));
     } finally {
       setState(() { _isUploading = false; });
     }
@@ -88,12 +124,7 @@ class _UploadScreenState extends State<UploadScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('영상 분석 요청'),
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
-        elevation: 1,
-      ),
+      appBar: AppBar(title: Text('영상 업로드 분석'), elevation: 0, backgroundColor: Colors.white, foregroundColor: Colors.black),
       body: Padding(
         padding: EdgeInsets.all(20),
         child: Column(
@@ -129,42 +160,34 @@ class _UploadScreenState extends State<UploadScreen> {
               ),
             ),
             SizedBox(height: 30),
-
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
                 icon: Icon(Icons.video_library),
                 label: Text(_selectedVideo == null ? '갤러리에서 선택' : '다른 영상 선택'),
                 onPressed: _pickVideo,
-                style: OutlinedButton.styleFrom(
-                  padding: EdgeInsets.all(15),
-                  side: BorderSide(color: Colors.blue),
-                ),
+                style: OutlinedButton.styleFrom(padding: EdgeInsets.all(15)),
               ),
             ),
             SizedBox(height: 15),
-
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: (_selectedVideo != null && !_isUploading) ? _uploadVideo : null,
+                onPressed: (_selectedVideo != null && !_isUploading) ? _uploadAndAnalyze : null,
                 child: _isUploading
                     ? Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
                     SizedBox(width: 15),
-                    Text('서버로 전송 중...'),
+                    Text('영상 분석 중...'), // 텍스트 변경
                   ],
                 )
-                    : Text('서버로 전송 및 분석 시작', style: TextStyle(fontSize: 16)),
+                    : Text('업로드 및 분석 시작', style: TextStyle(fontSize: 16)),
                 style: ElevatedButton.styleFrom(
                   padding: EdgeInsets.all(15),
                   backgroundColor: Colors.blue,
                   foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.blue.withOpacity(0.5),
-                  disabledForegroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                 ),
               ),
             ),
