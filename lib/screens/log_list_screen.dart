@@ -132,7 +132,7 @@ class _LogListScreenState extends State<LogListScreen> {
               ),
               // [수정된 부분] 제목에 이상행동 타입 표시
               title: Text(
-                '이상행동 감지 ⚠️ ${log.type}',
+                '이상행동 감지 ${log.type}',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
               ),
               subtitle: Padding(
